@@ -1,0 +1,277 @@
+#include <iostream>
+#include <math.h>
+#include <cmath>
+#include <vector>
+#include "opencv2/opencv.hpp"
+#include "opencv2/core/core.hpp"
+#include "opencv2/imgproc/imgproc.hpp"
+#include "opencv2/contrib/contrib.hpp"
+#include "mex.h"
+#include "foveal_handle.hpp"
+#include "mc_convert/mc_convert.hpp"
+#include <string>
+#include "MxArray.hpp"
+
+using namespace cv;
+
+class LaplacianBlending
+{
+public:
+    cv::Mat image;
+    int levels;
+    
+    std::vector<Mat> kernels;
+    
+    std::vector<Mat> imageLapPyr;
+    std::vector<Mat> foveatedPyr;
+    
+    Mat imageSmallestLevel;
+    
+    void buildPyramids()
+    {
+        imageLapPyr.clear();
+        Mat currentImg = image;
+        Mat down,up;
+        for (int l=0; l<levels; l++)
+        {
+            pyrDown(currentImg, down);
+
+            pyrUp(down, up, currentImg.size());
+
+            Mat lap = currentImg - up;
+
+            imageLapPyr[l]=lap;
+
+            if(l>0)
+            {
+                for(int i=0; i<l;++i)
+                {
+                    pyrUp(imageLapPyr[l],imageLapPyr[l],cv::Size(2*imageLapPyr[l].cols,2*imageLapPyr[l].rows));
+                }
+            }
+            currentImg = down;
+        }
+        
+
+
+        for(int i=0; i<levels-1;++i)
+        {
+            pyrUp(up, up, cv::Size(2*up.cols,2*up.rows));
+
+        }
+        
+        imageSmallestLevel=up;
+    }
+    
+public:
+    LaplacianBlending(const cv::Mat& _image,const int _levels, std::vector<Mat> _kernels):
+        image(_image),levels(_levels), kernels(_kernels)
+        {
+            image.convertTo(image,CV_64F);
+            imageLapPyr.resize(levels);
+            foveatedPyr.resize(levels);
+            
+            buildPyramids();
+        };
+        
+        void computeRois(const cv::Mat & center, 
+                cv::Rect & image_roi_rect, 
+                cv::Rect & kernel_roi_rect, 
+                cv::Mat & kernel_size,
+                cv::Mat & image_size)
+        {
+                cv::Mat upper_left_image_corner=center-kernel_size/2.0;
+                cv::Mat bottom_right_image_corner=center+kernel_size/2.0;
+                cv::Mat upper_left_kernel_corner=cv::Mat(2,1,CV_32S,cv::Scalar(0));
+                cv::Mat bottom_right_kernel_corner=kernel_size;
+                // encontrar roi na imagem
+                if(upper_left_image_corner.at<int>(0,0)<0)
+                {
+                    upper_left_kernel_corner.at<int>(0,0)=-upper_left_image_corner.at<int>(0,0);
+                    upper_left_image_corner.at<int>(0,0)=0.0;
+                }
+                if(upper_left_image_corner.at<int>(1,0)<0)
+                {
+                    upper_left_kernel_corner.at<int>(1,0)=-upper_left_image_corner.at<int>(1,0);
+                    upper_left_image_corner.at<int>(1,0)=0.0;
+                }
+                if(bottom_right_image_corner.at<int>(0,0)>image_size.at<int>(0,0))
+                {
+                    bottom_right_kernel_corner.at<int>(0,0)=kernel_size.at<int>(0,0)-bottom_right_image_corner.at<int>(0,0);
+                    bottom_right_image_corner.at<int>(0,0)=image_size.at<int>(0,0);
+                }
+                if(bottom_right_image_corner.at<int>(1,0)>image_size.at<int>(1,0))
+                {
+                    bottom_right_kernel_corner.at<int>(1,0)=image_size.at<int>(1,0)-center.at<int>(1,0);
+                    bottom_right_image_corner.at<int>(1,0)=image_size.at<int>(1,0);
+                }
+                std::cout << "upper_left_kernel_corner:" << upper_left_kernel_corner<< std::endl;
+                std::cout << "bottom_right_kernel_corner:" << bottom_right_kernel_corner<< std::endl;
+                std::cout << "upper_left_image_corner:" << upper_left_image_corner<< std::endl;
+                std::cout << "bottom_right_image_corner:" << bottom_right_image_corner<< std::endl;
+                image_size=bottom_right_image_corner-upper_left_image_corner;
+                kernel_size=bottom_right_kernel_corner-upper_left_kernel_corner;
+                std::cout << "image size:" << image_size << std::endl;
+                                std::cout << "kernel_size:" << kernel_size << std::endl;
+
+                image_roi_rect=cv::Rect(
+                        upper_left_image_corner.at<int>(0,0),
+                        upper_left_image_corner.at<int>(1,0),
+                        image_size.at<int>(0,0),
+                        image_size.at<int>(1,0));
+
+                // encontrar roi no kernel
+                kernel_roi_rect=cv::Rect(
+                        upper_left_kernel_corner.at<int>(0,0),
+                        upper_left_kernel_corner.at<int>(1,0),
+                        kernel_size.at<int>(0,0),
+                        kernel_size.at<int>(1,0));
+            std::cout << "kernel roi:" << kernel_roi_rect<< std::endl;
+            std::cout << "image roi:" << image_roi_rect<< std::endl;
+
+        }
+        
+        cv::Mat foveate(const cv::Mat & center)
+        {
+
+            cv::Mat image_size(2,1,CV_32S);
+
+            image_size.at<int>(0,0)=image.cols;
+            image_size.at<int>(1,0)=image.rows;
+            cv::Mat foveated_image(imageSmallestLevel);
+            cv::Rect image_roi_rect;
+            cv::Rect kernel_roi_rect;
+            for(int i=0; i<levels;++i)
+            {
+                // rows...
+                cv::Mat kernel_size(2,1,CV_32S);
+                kernel_size.at<int>(0,0)=kernels[i].cols;
+                kernel_size.at<int>(1,0)=kernels[i].rows;
+                
+                // encontrar rois 
+                computeRois(center,image_roi_rect,kernel_roi_rect,kernel_size,image_size);
+
+                // Multiplicar
+                cv::Mat result_roi;
+                //cv::normalize(imageLapPyr[i](image_roi_rect),imageLapPyr[i](image_roi_rect),image_roi_rect.width*image_roi_rect.height);
+                //std::cout << imageLapPyr[i](image_roi_rect)<< std::endl;
+                cv::multiply(imageLapPyr[i](image_roi_rect),kernels[i](kernel_roi_rect),result_roi,1.0);
+                cv::Mat aux_pyr;
+                imageLapPyr[i].copyTo(aux_pyr);
+                result_roi.copyTo(aux_pyr(image_roi_rect));
+                std::cout << image_roi_rect << std::endl;
+                std::cout << foveated_image.size() << std::endl;
+                            std::cout << "foveated_image(image_roi_rect)"<<  foveated_image(image_roi_rect).size()<<std::endl;
+                            std::cout << "aux_pyr(image_roi_rect)"<< aux_pyr(image_roi_rect).size()<<std::endl;
+
+                cv::add(foveated_image(image_roi_rect),aux_pyr(image_roi_rect),foveated_image(image_roi_rect));
+            }
+
+            return foveated_image;
+        }
+        
+        
+
+};
+
+
+
+
+void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
+{
+    // Get the command string
+    char cmd[64];
+    if (nrhs < 1 || mxGetString(prhs[0], cmd, sizeof(cmd)))
+        mexErrMsgTxt("First input should be a command string less than 64 characters long.");
+    
+    
+    
+    // New
+    if (!strcmp("new", cmd))
+    {
+        // Check parameters
+        std::cout << "nrhs: " << nrhs << std::endl;
+        
+
+        /*if(nrhs!=7)
+        {
+            mexErrMsgTxt("wrong inputs number");
+        }*/
+        const cv::Mat image=MxArray(prhs[1]).toMat();
+        double levels =*(double *) mxGetPr(prhs[2]);
+        vector<Mat> kernels;/*=MxArray(prhs[3]).toMat();*/
+        mxArray *cellElement;
+        int nfields = mxGetNumberOfElements(prhs[3]);
+
+        for(int i=0; i<nfields;++i)
+        {
+            cellElement = mxGetCell(prhs[3],i);
+            const cv::Mat aux=MxArray(cellElement).toMat();
+            kernels.push_back(aux);
+            kernels[i].convertTo(kernels[i],CV_64F);
+        }
+
+        
+        LaplacianBlending *laplacian(new LaplacianBlending(image,(int)levels, kernels));
+        plhs[0]=convertPtr2Mat<LaplacianBlending>(laplacian);
+        
+        return;
+    }
+    
+// Check there is a second input, which should be the class instance handle
+    if (nrhs < 2)
+        mexErrMsgTxt("Second input should be a class instance handle.");
+    
+// Delete
+    if (!strcmp("delete", cmd)) {
+        // Destroy the C++ object
+        destroyObject<LaplacianBlending>(prhs[1]);
+        // Warn if other commands were ignored
+        if (nlhs != 0 || nrhs != 2)
+            mexWarnMsgTxt("Delete: Unexpected arguments ignored.");
+        return;
+    }
+    
+    LaplacianBlending *laplacian = convertMat2Ptr<LaplacianBlending>(prhs[1]);
+    
+    if (!strcmp("get_pyramid", cmd))
+    {
+        if(nrhs!=2)
+        {
+            std::cout << "nrhs: " << nrhs << std::endl;
+            mexErrMsgTxt("wrong inputs number");
+            std::cout << "nrhs: " << nrhs << std::endl;
+        }
+        for(int i=0; i<laplacian->levels; ++i)
+        {
+            cv::Mat aux;
+            laplacian->imageLapPyr[i].convertTo(aux,CV_8U);
+            plhs[i]=Converter(aux);
+        }
+        
+        return;
+    }
+    
+    if (!strcmp("foveate", cmd))
+    {
+        if(nrhs!=3)
+        {
+            std::cout << "nrhs: " << nrhs << std::endl;
+            mexErrMsgTxt("wrong inputs number");
+        }
+        
+        
+        const cv::Mat center=MxArray(prhs[2]).toMat();
+        cv::Mat center_aux;
+        center.convertTo(center_aux,CV_32S);
+
+        cv::Mat foveated_image=laplacian->foveate(center_aux);
+        foveated_image.convertTo(foveated_image,CV_8U);
+        
+        plhs[0]=Converter(foveated_image);
+        return;
+    }
+    
+// Got here, so command not recognized
+    mexErrMsgTxt("Command not recognized.");
+}

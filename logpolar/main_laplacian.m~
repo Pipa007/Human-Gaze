@@ -1,0 +1,44 @@
+clc
+close all
+clear all
+close all
+% NRINGS=200;
+% NSECTORS=200;
+% RMIN=0.01;
+
+% create kernel
+cutoff=50;
+sigma = 1;
+m = cutoff*sigma; n = cutoff*sigma;
+[h1, h2] = meshgrid(-(m-1)/2:(m-1)/2, -(n-1)/2:(n-1)/2);
+hg = exp(- 0.5*(h1.^2+h2.^2) / (sigma^2));
+
+kernel_aux=zeros(m,n,3);
+kernel_aux(:,:,1)=hg ./ sum(hg(:));
+kernel_aux(:,:,2)=kernel_aux(:,:,1);
+kernel_aux(:,:,3)=kernel_aux(:,:,1);
+kernel{1}=kernel_aux;
+
+hg = exp(- 0.5*(h1.^2+h2.^2) / (2.0*sigma)^2);
+
+kernel_aux=zeros(m,n,3);
+kernel_aux(:,:,1)=hg ./ sum(hg(:));
+kernel_aux(:,:,2)=kernel_aux(:,:,1);
+kernel_aux(:,:,3)=kernel_aux(:,:,1);
+kernel{2} =kernel_aux;
+
+img=imread('peppers.png');
+levels=2;
+
+height=size(img,1);
+width=size(img,2);
+% img=rgb2gray(img);
+center=[width/2; height/2];
+%% Initialize foveal stereo object
+laplacian_mex_ = laplacian_interface(img, levels,kernel{1},kernel{2});
+pyramid={1,levels};
+[pyramid{1,1},pyramid{1,2}]=get_pyramid(laplacian_mex_);
+foveated_image=foveate(laplacian_mex_,center);
+imshow(foveated_image)
+
+
